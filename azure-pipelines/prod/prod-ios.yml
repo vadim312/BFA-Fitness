@@ -1,0 +1,149 @@
+trigger:
+  - master
+
+pool:
+  vmImage: 'macos-latest'
+
+parameters:
+  - name: environment
+    displayName: Environment
+    type: string
+    default: prod
+    values:
+      - dev
+      - prod
+      - QA
+
+variables:
+  - group: bfa-app-${{ parameters.environment }}
+  - name: buiName
+    value: BFA-ios-${{ parameters.environment }}
+
+steps:
+  - task: NodeTool@0
+    displayName: 'Install Node'
+    inputs:
+      versionSpec: '12.16.1'
+
+  # Environment variables
+  - task: Bash@3
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo CONTENTFUL_SPACE_ID=$(CONTENTFUL_SPACE_ID) >> ./.env
+        echo CONTENTFUL_CONTENT_ACCESS_TOKEN=$(CONTENTFUL_CONTENT_ACCESS_TOKEN) >> ./.env
+        echo CONTENTFUL_ENVIRONMENT=$(CONTENTFUL_ENVIRONMENT) >> ./.env
+        echo AUTH_PROVIDER_URL=${AUTH_PROVIDER_URL} >> ./.env
+        echo BASICFIT_SSO_SECRET=$(BASICFIT_SSO_SECRET) >> ./.env
+        echo BF_BACKEND_URL=$(BF_BACKEND_URL) >> ./.env
+
+  - task: DownloadSecureFile@1
+    name: firebasePlist
+    displayName: 'Fetching firebase config'
+    inputs:
+      secureFile: 'IOS-GoogleService-Info-${{ parameters.environment }}.plist'
+      retryCount: 5
+
+  - script: mv $(firebasePlist.secureFilePath) ./ios/GoogleService-Info.plist
+    workingDirectory: .
+    displayName: 'Inyecting firebase config into app'
+
+  # Continue Compiling process as normal
+  - script: npm install
+    workingDirectory: .
+    displayName: 'Install global node dependencies'
+
+  - script: npm run test
+    workingDirectory: .
+    displayName: 'Run tests'
+
+  - script: npm run test-coverage
+    workingDirectory: .
+    displayName: 'Run coverage'
+
+  - task: CocoaPods@0
+    displayName: 'Install CocoaPods dependencies'
+    inputs:
+      workingDirectory: './ios'
+      forceRepoUpdate: false
+
+  - script: npm run build-ios
+    workingDirectory: .
+    displayName: 'Compile react native'
+
+  - task: InstallAppleCertificate@2
+    displayName: 'Install Apple Certificate'
+    inputs:
+      certSecureFile: 'dev-certificate.p12'
+      certPwd: '$(CertificatePassword)'
+
+  - task: InstallAppleProvisioningProfile@1
+    displayName: 'Install Apple provisioning profile'
+    inputs:
+      provisioningProfileLocation: 'secureFiles'
+      provProfileSecureFile: 'dev.mobileprovision'
+
+  - task: Xcode@5
+    displayName: 'Build Mobile Application'
+    inputs:
+      actions: 'build'
+      configuration: 'Release'
+      sdk: 'iphoneos14.3'
+      xcWorkspacePath: './ios/BFA.xcworkspace'
+      scheme: 'BFA'
+      xcodeVersion: 'specifyPath'
+      xcodeDeveloperDir: '/Applications/Xcode_12.3.app/Contents/Developer'
+      packageApp: true
+      archivePath: 'output/archive'
+      exportPath: 'output/package'
+      signingOption: 'auto'
+      teamId: 'WB4532ZTF5'
+      args: '-allowProvisioningUpdates'
+
+  - task: CmdLine@2
+    displayName: 'Rename build artifact to include build number'
+    inputs:
+      script: 'mv output/package/BFA.ipa BFA-Release$(Build.BuildNumber).ipa'
+
+  - task: Bash@3
+    inputs:
+      targetType: 'inline'
+      script: |
+        set -x
+        ​
+        export buiChangeLog="Created on $(date +%d-%m-%Y) at $(date +%H:%M)"
+        ​
+        export project_id=2790
+        export api_key=nf7s4lmvtgzw
+        export api_key_build=5yCFZ9EzL7N8s5ygibudvkqwaxqfvh
+        export buiVisibleClient=true
+        export buiBuildType=QA
+        export buiBuildNum="$(Build.BuildNumber)"
+        export buiVersion="$(Build.BuildNumber)"
+        export buiName=${{ variables.buiName }}
+        export buildfile="BFA-Release$(Build.BuildNumber).ipa"
+
+        curl -vvv --fail \
+          -F "buiFile=@${buildfile}" \
+          -F "buiName=Release-${buiName}" \
+          -F "buiVersion=${buiVersion}" \
+          -F "buiBuildNum=${buiBuildNum}" \
+          -F "buiBuildType=${buiBuildType}" \
+          -F "buiTemplate=0" \
+          -F "buiHash=${api_build_hash}" \
+          -F "buiVisibleClient=$buiVisibleClient}" \
+          -F "buiChangeLog=${buiChangeLog}" \
+          -F "buiUser=bamboo" -F "buiPassword=asdf123" \
+          "https://otashare-api.mobgen.com/v1/builds/registernewbuild/${project_id}/${api_key}/${api_key_build}"
+
+  - task: PublishTestResults@2
+    inputs:
+      testResultsFormat: 'JUnit'
+      testResultsFiles: '__tests__/.output/test-report.xml'
+      testRunTitle: 'BasicFitApp-Unit-&-Integration-Tests'
+
+  - task: PublishCodeCoverageResults@1
+    inputs:
+      codeCoverageTool: 'Cobertura'
+      summaryFileLocation: '__coverage__/cobertura-coverage.xml'
+    displayName: 'Publish Code Coverage'

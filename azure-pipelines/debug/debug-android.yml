@@ -1,0 +1,131 @@
+trigger:
+  - develop
+
+parameters:
+  - name: environment
+    displayName: Environment
+    type: string
+    default: QA
+    values:
+      - dev
+      - prod
+      - QA
+
+variables:
+  - group: bfa-app-${{ parameters.environment }}
+  - name: buiName
+    value: BFA-$(Build.SourceBranchName)-${{ parameters.environment }}
+
+steps:
+  - task: NodeTool@0
+    displayName: 'Install Node'
+    inputs:
+      versionSpec: '12.16.1'
+
+  # Environment variables
+  - task: Bash@3
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo CONTENTFUL_SPACE_ID=$(CONTENTFUL_SPACE_ID) >> ./.env
+        echo CONTENTFUL_CONTENT_ACCESS_TOKEN=$(CONTENTFUL_CONTENT_ACCESS_TOKEN) >> ./.env
+        echo CONTENTFUL_ENVIRONMENT=$(CONTENTFUL_ENVIRONMENT) >> ./.env
+        echo AUTH_PROVIDER_URL=${AUTH_PROVIDER_URL} >> ./.env
+        echo BASICFIT_SSO_SECRET=$(BASICFIT_SSO_SECRET) >> ./.env
+        echo BF_BACKEND_URL=$(BF_BACKEND_URL) >> ./.env
+
+  - task: DownloadSecureFile@1
+    name: firebaseJson
+    displayName: 'Fetching firebase config'
+    inputs:
+      secureFile: 'Android-google-services-${{ parameters.environment }}.json'
+      retryCount: 5
+
+  - script: mv $(firebaseJson.secureFilePath) ./android/app/google-services.json
+    workingDirectory: .
+    displayName: 'Inyecting firebase config into app'
+
+  - script: npm install
+    workingDirectory: .
+    displayName: 'Install global node dependencies'
+
+  - script: npm run test
+    workingDirectory: .
+    displayName: 'Run tests'
+
+  - script: npm run test-coverage
+    workingDirectory: .
+    displayName: 'Run coverage'
+
+  # Android properties
+  - task: Bash@3
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo isQABuild=true >> ./android/gradle.properties
+        echo GOOGLE_MAPS_API_KEY=$(GOOGLE_MAPS_API_KEY) >> ./android/gradle.properties
+
+  - script: npx jetify
+    workingDirectory: .
+    displayName: 'Jetify'
+
+  - script: npm run build-android
+    workingDirectory: .
+    displayName: 'Compile react native'
+
+  - task: Gradle@2
+    inputs:
+      gradleWrapperFile: './android/gradlew'
+      workingDirectory: './android'
+      tasks: 'assembleDebug'
+      publishJUnitResults: false
+      javaHomeOption: 'JDKVersion'
+      jdkVersionOption: '1.11'
+      gradleOptions: '-Xmx3072m'
+      sonarQubeRunAnalysis: false
+
+  - script: mv ./android/app/build/outputs/apk/debug/app-debug.apk BFA-Debug$(Build.BuildNumber).apk
+    displayName: 'Rename apk'
+
+  - task: Bash@3
+    inputs:
+      targetType: 'inline'
+      script: |
+        set -x
+        ​
+        export buiChangeLog="Created on $(date +%d-%m-%Y) at $(date +%H:%M)"
+        ​
+        export project_id=2790
+        export api_key=nf7s4lmvtgzw
+        export api_key_build=5yCFZ9EzL7N8s5ygibudvkqwaxqfvh
+        export buiVisibleClient=true
+        export buiBuildType=QA
+        export buiBuildNum="$(Build.BuildNumber)"
+        export buiVersion="$(Build.BuildNumber)"
+        export buiName=${{ variables.buiName }}
+        export buildfile="BFA-Debug$(Build.BuildNumber).apk"
+
+        curl -vvv --fail \
+          -F "buiFile=@${buildfile}" \
+          -F "buiName=${buiName}" \
+          -F "buiVersion=${buiVersion}" \
+          -F "buiBuildNum=${buiBuildNum}" \
+          -F "buiBuildType=${buiBuildType}" \
+          -F "buiTemplate=0" \
+          -F "buiHash=${api_build_hash}" \
+          -F "buiVisibleClient=$buiVisibleClient}" \
+          -F "buiChangeLog=${buiChangeLog}" \
+          -F "buiUser=bamboo" -F "buiPassword=asdf123" \
+          "https://otashare-api.mobgen.com/v1/builds/registernewbuild/${project_id}/${api_key}/${api_key_build}"
+
+  - task: PublishTestResults@2
+    inputs:
+      testResultsFormat: 'JUnit'
+      testResultsFiles: '__tests__/.output/test-report.xml'
+      testRunTitle: 'BasicFitApp-Unit-&-Integration-Tests'
+
+  - task: PublishCodeCoverageResults@1
+    inputs:
+      codeCoverageTool: 'Cobertura'
+      summaryFileLocation: '__coverage__/cobertura-coverage.xml'
+    displayName: 'Publish Code Coverage'
